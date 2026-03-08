@@ -1,0 +1,16 @@
+[Unit]
+Description=Agent Relay — A2A message relay for CLI agents
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/agent-relay
+ExecStart=/opt/agent-relay/venv/bin/uvicorn relay.server:app --host 0.0.0.0 --port 8400
+Restart=always
+RestartSec=5
+Environment=RELAY_DB_PATH=/opt/agent-relay/relay.db
+Environment=RELAY_AUTH_ENABLED=true
+
+[Install]
+WantedBy=multi-user.target

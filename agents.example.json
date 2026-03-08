@@ -1,0 +1,21 @@
+[
+    {
+        "agent_id": "claude-code",
+        "name": "Claude Code",
+        "description": "Primary development agent",
+        "capabilities": ["code", "analysis", "memory"],
+        "trust_tier": 1,
+        "permissions": {"can_read_from": ["*"], "can_send_to": ["*"]}
+    },
+    {
+        "agent_id": "assistant",
+        "name": "Assistant",
+        "description": "Secondary agent for scheduling and admin",
+        "capabilities": ["scheduling", "email", "admin"],
+        "trust_tier": 2,
+        "permissions": {
+            "can_read_from": ["claude-code"],
+            "can_send_to": ["claude-code"]
+        }
+    }
+]
