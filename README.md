@@ -154,8 +154,8 @@ The data model is designed so that migrating to full A2A compliance is additive,
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  Claude Code │     │   Clawdia    │     │    Abby      │
-│  (CLI, Mac)  │     │  (daemon)    │     │  (CLI, Mac)  │
+│   Agent A    │     │   Agent B    │     │   Agent C    │
+│  (CLI tool)  │     │  (daemon)    │     │  (CLI tool)  │
 └──────┬───────┘     └──────┬───────┘     └──────┬───────┘
        │ MCP                │ HTTP/poll          │ MCP
        │                    │                    │

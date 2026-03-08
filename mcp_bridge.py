@@ -2,7 +2,7 @@
 """
 MCP Bridge for Agent Relay.
 
-Exposes the relay as 10 MCP tools that Claude Code and Abby can call natively.
+Exposes the relay as 10 MCP tools that agents can call natively.
 Communicates with the relay server via HTTP.
 
 Usage:

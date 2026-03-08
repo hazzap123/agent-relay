@@ -2,12 +2,10 @@
 End-to-end scenario test for Agent Relay.
 
 Simulates a realistic multi-agent coordination flow:
-1. Claude Code delegates scheduling to Clawdia (with input_needed round-trip)
-2. Claude Code delegates implementation to Abby
-3. Broadcast a travel notice to all agents
+1. Primary agent delegates scheduling to Scheduler (with input_needed round-trip)
+2. Primary agent delegates implementation to Builder
+3. Broadcast a notice to all agents
 4. Verify inbox state at each stage
-
-This is the test that proves the relay works before deploying to the Lenovo.
 """
 
 import pytest
@@ -56,162 +54,162 @@ async def test_full_e2e_scenario(client):
     # =========================================================================
 
     resp = await client.post("/api/v1/agents/register", json={
-        "agent_id": "claude-code",
-        "name": "Claude Code",
-        "description": "Chief of Staff — strategy, deep work, analysis, code, memory system",
+        "agent_id": "primary",
+        "name": "Primary Agent",
+        "description": "Strategy, analysis, code, and memory",
         "capabilities": ["strategy", "analysis", "code", "memory", "meeting-prep"],
         "trust_tier": 1,
         "permissions": {"can_read_from": ["*"], "can_send_to": ["*"]},
     })
     assert resp.status_code == 200
-    claude_key = resp.json()["api_key"]
-    assert len(claude_key) == 64
+    primary_key = resp.json()["api_key"]
+    assert len(primary_key) == 64
 
     resp = await client.post("/api/v1/agents/register", json={
-        "agent_id": "clawdia",
-        "name": "Clawdia",
-        "description": "Scheduling, follow-ups, email on behalf, admin tasks",
-        "capabilities": ["scheduling", "email", "follow-ups", "whatsapp", "browser-research"],
+        "agent_id": "scheduler",
+        "name": "Scheduler",
+        "description": "Scheduling, follow-ups, email, admin tasks",
+        "capabilities": ["scheduling", "email", "follow-ups", "browser-research"],
         "contact": {"method": "webhook", "webhook_url": "http://localhost:8080/webhook/incoming"},
         "trust_tier": 2,
         "permissions": {
-            "can_read_from": ["claude-code", "harry"],
-            "can_send_to": ["claude-code", "abby"],
+            "can_read_from": ["primary"],
+            "can_send_to": ["primary", "builder"],
         },
     })
     assert resp.status_code == 200
-    clawdia_key = resp.json()["api_key"]
+    scheduler_key = resp.json()["api_key"]
 
     resp = await client.post("/api/v1/agents/register", json={
-        "agent_id": "abby",
-        "name": "Abby",
-        "description": "Code execution, specs to shipped features, focused implementation",
+        "agent_id": "builder",
+        "name": "Builder",
+        "description": "Code execution, specs to shipped features",
         "capabilities": ["code-execution", "implementation", "testing", "deployment"],
         "trust_tier": 1,
         "permissions": {"can_read_from": ["*"], "can_send_to": ["*"]},
     })
     assert resp.status_code == 200
-    abby_key = resp.json()["api_key"]
+    builder_key = resp.json()["api_key"]
 
     # Verify all agents visible
-    resp = await client.get("/api/v1/agents", headers=_bearer(claude_key))
+    resp = await client.get("/api/v1/agents", headers=_bearer(primary_key))
     agents = resp.json()["agents"]
     assert len(agents) == 3
     agent_ids = {a["agent_id"] for a in agents}
-    assert agent_ids == {"claude-code", "clawdia", "abby"}
+    assert agent_ids == {"primary", "scheduler", "builder"}
 
     # =========================================================================
-    # Phase 2: Claude Code sends heartbeat (session start)
+    # Phase 2: Primary agent sends heartbeat (session start)
     # =========================================================================
 
-    resp = await client.post("/api/v1/agents/claude-code/heartbeat",
+    resp = await client.post("/api/v1/agents/primary/heartbeat",
                              json={"status": "online"})
     assert resp.status_code == 200
 
     # Check inbox is empty at start
-    resp = await client.get("/api/v1/inbox/claude-code", headers=_bearer(claude_key))
+    resp = await client.get("/api/v1/inbox/primary", headers=_bearer(primary_key))
     inbox = resp.json()
     assert len(inbox["pending_tasks"]) == 0
     assert len(inbox["unread_messages"]) == 0
     assert len(inbox["tasks_needing_input"]) == 0
 
     # =========================================================================
-    # Phase 3: Delegate scheduling to Clawdia
+    # Phase 3: Delegate scheduling to Scheduler
     # =========================================================================
 
-    resp = await client.post("/api/v1/tasks", headers=_bearer(claude_key), json={
-        "to_agent": "clawdia",
-        "title": "Schedule call with Firefish team",
-        "description": "Schedule a 45-min call with the Firefish team for next week. "
-                       "Check Harry's calendar for availability. Prefer afternoons.",
+    resp = await client.post("/api/v1/tasks", headers=_bearer(primary_key), json={
+        "to_agent": "scheduler",
+        "title": "Schedule call with Acme Corp team",
+        "description": "Schedule a 45-min call with the Acme Corp team for next week. "
+                       "Check calendar for availability. Prefer afternoons.",
         "priority": "normal",
-        "metadata": {"stream": "C", "context": "Firefish consulting engagement"},
+        "metadata": {"stream": "C", "context": "Consulting engagement"},
     })
     assert resp.status_code == 200
-    firefish_task = resp.json()
-    firefish_id = firefish_task["task_id"]
-    assert firefish_task["status"] == "submitted"
-    assert firefish_task["from_agent"] == "claude-code"
-    assert firefish_task["to_agent"] == "clawdia"
+    acme_task = resp.json()
+    acme_id = acme_task["task_id"]
+    assert acme_task["status"] == "submitted"
+    assert acme_task["from_agent"] == "primary"
+    assert acme_task["to_agent"] == "scheduler"
 
-    # Clawdia's inbox should show the task
-    resp = await client.get("/api/v1/inbox/clawdia", headers=_bearer(clawdia_key))
+    # Scheduler's inbox should show the task
+    resp = await client.get("/api/v1/inbox/scheduler", headers=_bearer(scheduler_key))
     inbox = resp.json()
     assert len(inbox["pending_tasks"]) == 1
-    assert inbox["pending_tasks"][0]["task_id"] == firefish_id
-    assert inbox["pending_tasks"][0]["title"] == "Schedule call with Firefish team"
+    assert inbox["pending_tasks"][0]["task_id"] == acme_id
+    assert inbox["pending_tasks"][0]["title"] == "Schedule call with Acme Corp team"
 
     # =========================================================================
-    # Phase 4: Clawdia accepts, then needs input
+    # Phase 4: Scheduler accepts, then needs input
     # =========================================================================
 
     # Accept
-    resp = await client.patch(f"/api/v1/tasks/{firefish_id}",
-                              headers=_bearer(clawdia_key), json={
+    resp = await client.patch(f"/api/v1/tasks/{acme_id}",
+                              headers=_bearer(scheduler_key), json={
         "status": "accepted",
-        "message": "On it. Checking Harry's calendar now.",
+        "message": "On it. Checking calendar now.",
     })
     assert resp.json()["status"] == "accepted"
 
-    # Clawdia needs input — multiple contacts at Firefish
-    resp = await client.patch(f"/api/v1/tasks/{firefish_id}",
-                              headers=_bearer(clawdia_key), json={
+    # Scheduler needs input — multiple contacts
+    resp = await client.patch(f"/api/v1/tasks/{acme_id}",
+                              headers=_bearer(scheduler_key), json={
         "status": "input_needed",
-        "message": "Found 3 contacts at Firefish: Mike (CEO), Sarah (CTO), "
-                   "and James (PM). Which ones should be on the call?",
+        "message": "Found 3 contacts at Acme Corp: Alice (CEO), Bob (CTO), "
+                   "and Carol (PM). Which ones should be on the call?",
     })
     assert resp.json()["status"] == "input_needed"
 
-    # Claude Code's inbox should show input_needed
-    resp = await client.get("/api/v1/inbox/claude-code", headers=_bearer(claude_key))
+    # Primary's inbox should show input_needed
+    resp = await client.get("/api/v1/inbox/primary", headers=_bearer(primary_key))
     inbox = resp.json()
     assert len(inbox["tasks_needing_input"]) == 1
-    assert inbox["tasks_needing_input"][0]["task_id"] == firefish_id
+    assert inbox["tasks_needing_input"][0]["task_id"] == acme_id
 
-    # Claude Code should also have unread messages from Clawdia
+    # Primary should also have unread messages from Scheduler
     assert len(inbox["unread_messages"]) >= 1
 
     # =========================================================================
-    # Phase 5: Claude Code replies, Clawdia completes with artifact
+    # Phase 5: Primary replies, Scheduler completes with artifact
     # =========================================================================
 
-    # Claude Code replies
-    resp = await client.post(f"/api/v1/tasks/{firefish_id}/messages",
-                             headers=_bearer(claude_key), json={
-        "content": "Mike and Sarah. Not James — he's the day-to-day contact, "
+    # Primary replies
+    resp = await client.post(f"/api/v1/tasks/{acme_id}/messages",
+                             headers=_bearer(primary_key), json={
+        "content": "Alice and Bob. Not Carol — she's the day-to-day contact, "
                    "this is a strategic review.",
     })
     assert resp.status_code == 200
 
-    # Clawdia sees the reply in her inbox
-    resp = await client.get("/api/v1/inbox/clawdia", headers=_bearer(clawdia_key))
+    # Scheduler sees the reply in inbox
+    resp = await client.get("/api/v1/inbox/scheduler", headers=_bearer(scheduler_key))
     inbox = resp.json()
     assert len(inbox["unread_messages"]) >= 1
 
-    # Clawdia completes the task
-    resp = await client.patch(f"/api/v1/tasks/{firefish_id}",
-                              headers=_bearer(clawdia_key), json={
+    # Scheduler completes the task
+    resp = await client.patch(f"/api/v1/tasks/{acme_id}",
+                              headers=_bearer(scheduler_key), json={
         "status": "completed",
-        "message": "Scheduled: Firefish strategy call, Wed 12 March 14:00-14:45. "
-                   "Attendees: Mike, Sarah, Harry. Calendar invite sent.",
+        "message": "Scheduled: Acme strategy call, Wed 12 March 14:00-14:45. "
+                   "Attendees: Alice, Bob, and you. Calendar invite sent.",
     })
     assert resp.json()["status"] == "completed"
 
     # Attach calendar event artifact
-    resp = await client.post(f"/api/v1/tasks/{firefish_id}/artifacts",
-                             headers=_bearer(clawdia_key), json={
+    resp = await client.post(f"/api/v1/tasks/{acme_id}/artifacts",
+                             headers=_bearer(scheduler_key), json={
         "name": "calendar_event",
-        "content": '{"event_id": "ff_call_123", "title": "Firefish Strategy Review", '
+        "content": '{"event_id": "acme_call_123", "title": "Acme Strategy Review", '
                    '"start": "2026-03-12T14:00:00Z", "end": "2026-03-12T14:45:00Z", '
-                   '"attendees": ["mike@firefish.co.uk", "sarah@firefish.co.uk", '
-                   '"harry@haiven.co.uk"]}',
+                   '"attendees": ["alice@example.com", "bob@example.com", '
+                   '"user@example.com"]}',
         "mime_type": "application/json",
     })
     assert resp.status_code == 200
     assert resp.json()["name"] == "calendar_event"
 
     # Verify full task with messages + artifacts
-    resp = await client.get(f"/api/v1/tasks/{firefish_id}", headers=_bearer(claude_key))
+    resp = await client.get(f"/api/v1/tasks/{acme_id}", headers=_bearer(primary_key))
     full_task = resp.json()
     assert full_task["status"] == "completed"
     assert len(full_task["messages"]) == 4  # accepted msg + input_needed msg + reply + completed msg
@@ -219,99 +217,99 @@ async def test_full_e2e_scenario(client):
     assert full_task["artifacts"][0]["name"] == "calendar_event"
 
     # =========================================================================
-    # Phase 6: Delegate implementation to Abby
+    # Phase 6: Delegate implementation to Builder
     # =========================================================================
 
-    resp = await client.post("/api/v1/tasks", headers=_bearer(claude_key), json={
-        "to_agent": "abby",
-        "title": "Implement people trust-tier API endpoint",
-        "description": "Add GET /api/people/{email}/tier endpoint to the MCP server. "
+    resp = await client.post("/api/v1/tasks", headers=_bearer(primary_key), json={
+        "to_agent": "builder",
+        "title": "Implement contact trust-tier API endpoint",
+        "description": "Add GET /api/contacts/{email}/tier endpoint to the server. "
                        "Returns trust tier for a given contact email. "
-                       "See people.py for existing lookup logic.",
+                       "See contacts.py for existing lookup logic.",
         "priority": "high",
-        "metadata": {"stream": "A", "repo": "ea", "branch": "feature/people-api"},
+        "metadata": {"stream": "A", "repo": "my-project", "branch": "feature/contacts-api"},
     })
     assert resp.status_code == 200
-    people_task = resp.json()
-    people_id = people_task["task_id"]
+    contacts_task = resp.json()
+    contacts_id = contacts_task["task_id"]
 
-    # Abby starts a session — heartbeat + inbox check
-    resp = await client.post("/api/v1/agents/abby/heartbeat",
+    # Builder starts a session — heartbeat + inbox check
+    resp = await client.post("/api/v1/agents/builder/heartbeat",
                              json={"status": "online"})
     assert resp.status_code == 200
 
-    resp = await client.get("/api/v1/inbox/abby", headers=_bearer(abby_key))
+    resp = await client.get("/api/v1/inbox/builder", headers=_bearer(builder_key))
     inbox = resp.json()
     assert len(inbox["pending_tasks"]) == 1
-    assert inbox["pending_tasks"][0]["task_id"] == people_id
+    assert inbox["pending_tasks"][0]["task_id"] == contacts_id
     assert inbox["pending_tasks"][0]["priority"] == "high"
 
-    # Abby accepts and works
-    resp = await client.patch(f"/api/v1/tasks/{people_id}",
-                              headers=_bearer(abby_key), json={
+    # Builder accepts and works
+    resp = await client.patch(f"/api/v1/tasks/{contacts_id}",
+                              headers=_bearer(builder_key), json={
         "status": "accepted",
     })
     assert resp.json()["status"] == "accepted"
 
-    resp = await client.patch(f"/api/v1/tasks/{people_id}",
-                              headers=_bearer(abby_key), json={
+    resp = await client.patch(f"/api/v1/tasks/{contacts_id}",
+                              headers=_bearer(builder_key), json={
         "status": "working",
-        "message": "Found people.py lookup logic. Implementing endpoint now.",
+        "message": "Found contacts.py lookup logic. Implementing endpoint now.",
     })
     assert resp.json()["status"] == "working"
 
-    # Abby completes with artifact
-    resp = await client.patch(f"/api/v1/tasks/{people_id}",
-                              headers=_bearer(abby_key), json={
+    # Builder completes with artifact
+    resp = await client.patch(f"/api/v1/tasks/{contacts_id}",
+                              headers=_bearer(builder_key), json={
         "status": "completed",
-        "message": "Implemented in commit abc123 on branch feature/people-api. "
+        "message": "Implemented in commit abc123 on branch feature/contacts-api. "
                    "4 tests passing. Ready for review.",
     })
     assert resp.json()["status"] == "completed"
 
-    resp = await client.post(f"/api/v1/tasks/{people_id}/artifacts",
-                             headers=_bearer(abby_key), json={
+    resp = await client.post(f"/api/v1/tasks/{contacts_id}/artifacts",
+                             headers=_bearer(builder_key), json={
         "name": "implementation_result",
-        "content": '{"commit": "abc123", "branch": "feature/people-api", '
+        "content": '{"commit": "abc123", "branch": "feature/contacts-api", '
                    '"tests": "4/4 passing", "files_changed": '
-                   '["mcp_server.py", "people.py", "tests/test_people.py"]}',
+                   '["server.py", "contacts.py", "tests/test_contacts.py"]}',
         "mime_type": "application/json",
     })
     assert resp.status_code == 200
 
-    # Abby goes offline
-    resp = await client.post("/api/v1/agents/abby/heartbeat",
+    # Builder goes offline
+    resp = await client.post("/api/v1/agents/builder/heartbeat",
                              json={"status": "offline"})
     assert resp.status_code == 200
 
     # =========================================================================
-    # Phase 7: Broadcast travel notice
+    # Phase 7: Broadcast notice
     # =========================================================================
 
-    resp = await client.post("/api/v1/broadcast", headers=_bearer(claude_key), json={
-        "content": "Harry is travelling Mon-Wed next week. No meetings before 10:00. "
+    resp = await client.post("/api/v1/broadcast", headers=_bearer(primary_key), json={
+        "content": "Travelling Mon-Wed next week. No meetings before 10:00. "
                    "All scheduling requests should account for timezone shift (+1h, CET).",
         "metadata": {"type": "travel-notice", "valid_until": "2026-03-12"},
     })
     assert resp.status_code == 200
     broadcast_result = resp.json()
-    assert broadcast_result["recipients"] == 2  # clawdia + abby (not self)
+    assert broadcast_result["recipients"] == 2  # scheduler + builder (not self)
 
     # =========================================================================
     # Phase 8: Verify final state
     # =========================================================================
 
-    # Claude Code's inbox — should see completed task notifications from Abby
-    resp = await client.get("/api/v1/inbox/claude-code", headers=_bearer(claude_key))
+    # Primary's inbox — should see completed task notifications from Builder
+    resp = await client.get("/api/v1/inbox/primary", headers=_bearer(primary_key))
     inbox = resp.json()
     # No pending tasks (both completed)
     assert len(inbox["pending_tasks"]) == 0
     assert len(inbox["tasks_needing_input"]) == 0
-    # Should have unread messages from Abby's updates
+    # Should have unread messages from Builder's updates
     assert len(inbox["unread_messages"]) >= 1
 
     # List all tasks — should see both
-    resp = await client.get("/api/v1/tasks", headers=_bearer(claude_key))
+    resp = await client.get("/api/v1/tasks", headers=_bearer(primary_key))
     all_tasks = resp.json()["tasks"]
     # Filter out broadcast tasks
     real_tasks = [t for t in all_tasks if not t["task_id"].startswith("bcast_")]
@@ -321,13 +319,13 @@ async def test_full_e2e_scenario(client):
     assert len(completed_tasks) == 2
 
     # Agent status check
-    resp = await client.get("/api/v1/agents", headers=_bearer(claude_key))
+    resp = await client.get("/api/v1/agents", headers=_bearer(primary_key))
     agents = {a["agent_id"]: a for a in resp.json()["agents"]}
-    assert agents["claude-code"]["status"] == "online"
-    assert agents["abby"]["status"] == "offline"
+    assert agents["primary"]["status"] == "online"
+    assert agents["builder"]["status"] == "offline"
 
     # Audit log — should have comprehensive trail
-    resp = await client.get("/api/v1/audit", headers=_bearer(claude_key))
+    resp = await client.get("/api/v1/audit", headers=_bearer(primary_key))
     entries = resp.json()["entries"]
     event_types = {e["event_type"] for e in entries}
     assert "agent.registered" in event_types
@@ -341,23 +339,23 @@ async def test_full_e2e_scenario(client):
     # Phase 9: Trust boundary verification
     # =========================================================================
 
-    # Clawdia (Tier 2) cannot read Abby's task
-    resp = await client.get(f"/api/v1/tasks/{people_id}",
-                            headers=_bearer(clawdia_key))
+    # Scheduler (Tier 2) cannot read Builder's task
+    resp = await client.get(f"/api/v1/tasks/{contacts_id}",
+                            headers=_bearer(scheduler_key))
     assert resp.status_code == 403
 
-    # Clawdia cannot read Claude Code's inbox
-    resp = await client.get("/api/v1/inbox/claude-code",
-                            headers=_bearer(clawdia_key))
+    # Scheduler cannot read Primary's inbox
+    resp = await client.get("/api/v1/inbox/primary",
+                            headers=_bearer(scheduler_key))
     assert resp.status_code == 403
 
-    # Clawdia cannot access audit log
-    resp = await client.get("/api/v1/audit", headers=_bearer(clawdia_key))
+    # Scheduler cannot access audit log
+    resp = await client.get("/api/v1/audit", headers=_bearer(scheduler_key))
     assert resp.status_code == 403
 
-    # Clawdia CAN read her own completed task
-    resp = await client.get(f"/api/v1/tasks/{firefish_id}",
-                            headers=_bearer(clawdia_key))
+    # Scheduler CAN read their own completed task
+    resp = await client.get(f"/api/v1/tasks/{acme_id}",
+                            headers=_bearer(scheduler_key))
     assert resp.status_code == 200
     assert resp.json()["status"] == "completed"
 
