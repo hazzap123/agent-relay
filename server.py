@@ -20,6 +20,7 @@ from .auth import (
 from .config import AUTH_ENABLED, DB_PATH, HOST, PORT
 from .db import Database
 from .models import (
+    AcknowledgeRequest,
     AgentRegisterRequest,
     ArtifactCreateRequest,
     BroadcastRequest,
@@ -69,6 +70,21 @@ async def health(request: Request):
 @app.post("/api/v1/agents/register")
 async def register_agent(body: AgentRegisterRequest, request: Request):
     db: Database = request.app.state.db
+
+    # Cap self-registration at tier 2 unless:
+    # 1. An existing tier-1 agent authenticates (admin vouch), or
+    # 2. No agents exist yet (bootstrap — first agent gets requested tier)
+    effective_tier = body.trust_tier
+    if effective_tier < 2:
+        agents = await db.list_agents()
+        if agents:  # Not bootstrap — require admin auth
+            try:
+                caller = await get_authenticated_agent(request)
+                if caller.get("trust_tier", 3) > 1:
+                    effective_tier = 2  # Non-admin caller can't grant tier 1
+            except HTTPException:
+                effective_tier = 2  # No auth header = cap at tier 2
+
     agent, api_key = await db.register_agent(
         agent_id=body.agent_id,
         name=body.name,
@@ -77,7 +93,7 @@ async def register_agent(body: AgentRegisterRequest, request: Request):
         capabilities=body.capabilities,
         contact_method=body.contact.method.value,
         webhook_url=body.contact.webhook_url,
-        trust_tier=body.trust_tier,
+        trust_tier=effective_tier,
         permissions=body.permissions.model_dump(),
         metadata=body.metadata,
         api_key=body.api_key,
@@ -109,7 +125,12 @@ async def get_agent(agent_id: str, request: Request):
 @app.post("/api/v1/agents/{agent_id}/heartbeat")
 async def heartbeat(agent_id: str, body: HeartbeatRequest, request: Request):
     db: Database = request.app.state.db
-    # Allow heartbeat with just X-Agent-ID (no full auth required for heartbeat)
+
+    # Authenticate: caller must be the agent sending the heartbeat
+    caller = await get_authenticated_agent(request)
+    if caller["agent_id"] != agent_id and caller.get("trust_tier", 3) > 1:
+        raise HTTPException(status_code=403, detail="Can only heartbeat as yourself")
+
     success = await db.heartbeat(agent_id, body.status.value)
     if not success:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
@@ -257,14 +278,13 @@ async def get_inbox(agent_id: str, request: Request):
 
 
 @app.post("/api/v1/inbox/{agent_id}/ack")
-async def acknowledge_inbox(agent_id: str, body: dict, request: Request):
+async def acknowledge_inbox(agent_id: str, body: AcknowledgeRequest, request: Request):
     caller = await get_authenticated_agent(request)
     if caller.get("trust_tier", 3) > 1 and caller["agent_id"] != agent_id:
         raise HTTPException(status_code=403, detail="Can only acknowledge own inbox")
 
     db: Database = request.app.state.db
-    delivery_ids = body.get("delivery_ids", [])
-    count = await db.acknowledge(agent_id, delivery_ids)
+    count = await db.acknowledge(agent_id, body.delivery_ids)
     return {"acknowledged": count}
 
 

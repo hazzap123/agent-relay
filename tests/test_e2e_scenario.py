@@ -65,7 +65,8 @@ async def test_full_e2e_scenario(client):
     primary_key = resp.json()["api_key"]
     assert len(primary_key) == 64
 
-    resp = await client.post("/api/v1/agents/register", json={
+    resp = await client.post("/api/v1/agents/register",
+                             headers=_bearer(primary_key), json={
         "agent_id": "scheduler",
         "name": "Scheduler",
         "description": "Scheduling, follow-ups, email, admin tasks",
@@ -80,7 +81,8 @@ async def test_full_e2e_scenario(client):
     assert resp.status_code == 200
     scheduler_key = resp.json()["api_key"]
 
-    resp = await client.post("/api/v1/agents/register", json={
+    resp = await client.post("/api/v1/agents/register",
+                             headers=_bearer(primary_key), json={
         "agent_id": "builder",
         "name": "Builder",
         "description": "Code execution, specs to shipped features",
@@ -103,6 +105,7 @@ async def test_full_e2e_scenario(client):
     # =========================================================================
 
     resp = await client.post("/api/v1/agents/primary/heartbeat",
+                             headers=_bearer(primary_key),
                              json={"status": "online"})
     assert resp.status_code == 200
 
@@ -235,6 +238,7 @@ async def test_full_e2e_scenario(client):
 
     # Builder starts a session — heartbeat + inbox check
     resp = await client.post("/api/v1/agents/builder/heartbeat",
+                             headers=_bearer(builder_key),
                              json={"status": "online"})
     assert resp.status_code == 200
 
@@ -279,6 +283,7 @@ async def test_full_e2e_scenario(client):
 
     # Builder goes offline
     resp = await client.post("/api/v1/agents/builder/heartbeat",
+                             headers=_bearer(builder_key),
                              json={"status": "offline"})
     assert resp.status_code == 200
 

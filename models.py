@@ -74,13 +74,13 @@ class AgentPermissions(BaseModel):
 
 
 class AgentRegisterRequest(BaseModel):
-    agent_id: str
-    name: str
-    description: Optional[str] = None
+    agent_id: str = Field(..., max_length=64)
+    name: str = Field(..., max_length=100)
+    description: Optional[str] = Field(None, max_length=500)
     version: str = "1.0.0"
-    capabilities: list[str] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=list, max_length=20)
     contact: AgentContact = Field(default_factory=AgentContact)
-    trust_tier: int = 3
+    trust_tier: int = Field(3, ge=1, le=3)
     permissions: AgentPermissions = Field(default_factory=AgentPermissions)
     metadata: Optional[dict] = None
     api_key: Optional[str] = None  # If not provided, one is generated
@@ -105,9 +105,9 @@ class AgentCard(BaseModel):
 # --- Task ---
 
 class TaskCreateRequest(BaseModel):
-    to_agent: str
-    title: str
-    description: Optional[str] = None
+    to_agent: str = Field(..., max_length=64)
+    title: str = Field(..., max_length=500)
+    description: Optional[str] = Field(None, max_length=10000)
     priority: Priority = Priority.normal
     due_by: Optional[str] = None
     metadata: Optional[dict] = None
@@ -140,7 +140,7 @@ class TaskWithMessages(Task):
 # --- Message ---
 
 class MessageCreateRequest(BaseModel):
-    content: str  # Convenience: auto-wraps as text Part
+    content: str = Field(..., max_length=50000)
     parts: Optional[list[Part]] = None  # Or provide structured parts
 
 
@@ -156,9 +156,9 @@ class Message(BaseModel):
 # --- Artifact ---
 
 class ArtifactCreateRequest(BaseModel):
-    name: str
-    content: Optional[str] = None  # Text content shortcut
-    mime_type: Optional[str] = None
+    name: str = Field(..., max_length=200)
+    content: Optional[str] = Field(None, max_length=100000)
+    mime_type: Optional[str] = Field(None, max_length=100)
     parts: Optional[list[Part]] = None
 
 
@@ -173,7 +173,7 @@ class Artifact(BaseModel):
 # --- Broadcast ---
 
 class BroadcastRequest(BaseModel):
-    content: str
+    content: str = Field(..., max_length=50000)
     metadata: Optional[dict] = None
 
 
@@ -186,6 +186,10 @@ class InboxResponse(BaseModel):
 
 
 # --- Heartbeat ---
+
+class AcknowledgeRequest(BaseModel):
+    delivery_ids: list[str] = Field(..., max_length=100)
+
 
 class HeartbeatRequest(BaseModel):
     status: AgentStatus = AgentStatus.online

@@ -121,6 +121,7 @@ async def test_list_agents(client, registered_agents):
 @pytest.mark.asyncio
 async def test_heartbeat(client, registered_agents):
     resp = await client.post("/api/v1/agents/primary/heartbeat",
+                             headers=_h("primary"),
                              json={"status": "online"})
     assert resp.status_code == 200
 

@@ -4,6 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
+# Recommended: create a dedicated user (e.g. useradd -r -s /bin/false relay)
+# User=relay
 User=root
 WorkingDirectory=/opt/agent-relay
 ExecStart=/opt/agent-relay/venv/bin/uvicorn relay.server:app --host 0.0.0.0 --port 8400

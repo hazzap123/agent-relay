@@ -167,6 +167,13 @@ The data model is designed so that migrating to full A2A compliance is additive,
 └─────────────────────────────────────────────────────────┘
 ```
 
+## Security Notes
+
+- **No TLS** — the server binds plain HTTP. Designed for use behind Tailscale (which provides encryption) or a reverse proxy. Do not expose directly to the internet without TLS termination.
+- **No rate limiting** — a misbehaving agent could flood the relay. Consider adding `slowapi` or a reverse proxy rate limiter for production use.
+- **SQLite concurrency** — under heavy concurrent writes you may see "database is locked" errors. Add `PRAGMA busy_timeout=5000` if this occurs. For high-throughput deployments, consider PostgreSQL.
+- **Systemd runs as root** — the included service file defaults to `User=root`. Create a dedicated service user for production (`useradd -r -s /bin/false relay`).
+
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).
