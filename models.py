@@ -8,7 +8,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from urllib.parse import urlparse
+
+from pydantic import BaseModel, Field, field_validator
 
 
 # --- Enums ---
@@ -66,6 +68,19 @@ class AgentContact(BaseModel):
     method: ContactMethod = ContactMethod.poll
     webhook_url: Optional[str] = None
 
+    @field_validator("webhook_url")
+    @classmethod
+    def validate_webhook_url(cls, v):
+        if v is None:
+            return v
+        parsed = urlparse(v)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("webhook_url must use http or https scheme")
+        host = parsed.hostname or ""
+        if host == "169.254.169.254":
+            raise ValueError("webhook_url cannot target metadata service")
+        return v
+
 
 class AgentPermissions(BaseModel):
     can_read_from: list[str] = Field(default_factory=lambda: ["*"])
@@ -111,6 +126,20 @@ class TaskCreateRequest(BaseModel):
     priority: Priority = Priority.normal
     due_by: Optional[str] = None
     metadata: Optional[dict] = None
+
+    @field_validator("metadata")
+    @classmethod
+    def validate_metadata(cls, v):
+        if v is None:
+            return v
+        if len(v) > 20:
+            raise ValueError("metadata limited to 20 keys")
+        for key, val in v.items():
+            if not isinstance(key, str) or len(key) > 100:
+                raise ValueError("metadata keys must be strings under 100 chars")
+            if isinstance(val, str) and len(val) > 2000:
+                raise ValueError("metadata string values must be under 2000 chars")
+        return v
 
 
 class TaskUpdateRequest(BaseModel):

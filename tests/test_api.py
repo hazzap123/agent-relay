@@ -437,3 +437,105 @@ async def test_get_task_with_messages(client, registered_agents):
     data = resp.json()
     assert len(data["messages"]) == 1
     assert len(data["artifacts"]) == 1
+
+
+# --- Re-registration Security ---
+
+@pytest.mark.asyncio
+async def test_reregister_without_auth_rejected(client):
+    """Unauthenticated re-registration must be blocked (account takeover prevention)."""
+    resp = await client.post("/api/v1/agents/register", json={
+        "agent_id": "victim",
+        "name": "Original Agent",
+    })
+    assert resp.status_code == 200
+
+    # Try to re-register same ID without auth
+    resp = await client.post("/api/v1/agents/register", json={
+        "agent_id": "victim",
+        "name": "Attacker",
+    })
+    assert resp.status_code == 409
+    assert "already registered" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_reregister_with_correct_key_allowed(client):
+    """Re-registration with the agent's own Bearer token should succeed."""
+    resp = await client.post("/api/v1/agents/register", json={
+        "agent_id": "self-update",
+        "name": "Original",
+    })
+    api_key = resp.json()["api_key"]
+
+    resp = await client.post("/api/v1/agents/register",
+                             headers={"Authorization": f"Bearer {api_key}"},
+                             json={
+        "agent_id": "self-update",
+        "name": "Updated Name",
+    })
+    assert resp.status_code == 200
+    assert resp.json()["agent"]["name"] == "Updated Name"
+
+
+@pytest.mark.asyncio
+async def test_reregister_with_admin_allowed(client, registered_agents):
+    """Tier-1 admin can re-register another agent."""
+    admin_key = registered_agents["primary"]  # tier 1
+
+    resp = await client.post("/api/v1/agents/register",
+                             headers={"Authorization": f"Bearer {admin_key}"},
+                             json={
+        "agent_id": "scheduler",
+        "name": "Scheduler Reregistered",
+    })
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_reregister_with_wrong_key_rejected(client, registered_agents):
+    """Non-admin agent can't re-register a different agent."""
+    scheduler_key = registered_agents["scheduler"]  # tier 2
+
+    resp = await client.post("/api/v1/agents/register",
+                             headers={"Authorization": f"Bearer {scheduler_key}"},
+                             json={
+        "agent_id": "primary",
+        "name": "Hijacked",
+    })
+    assert resp.status_code == 403
+
+
+# --- Webhook URL Validation ---
+
+@pytest.mark.asyncio
+async def test_webhook_url_bad_scheme_rejected(client):
+    """file:// scheme must be rejected."""
+    resp = await client.post("/api/v1/agents/register", json={
+        "agent_id": "bad-scheme",
+        "name": "Bad Scheme",
+        "contact": {"method": "webhook", "webhook_url": "file:///etc/passwd"},
+    })
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_webhook_url_metadata_rejected(client):
+    """Cloud metadata IP must be blocked."""
+    resp = await client.post("/api/v1/agents/register", json={
+        "agent_id": "ssrf",
+        "name": "SSRF Agent",
+        "contact": {"method": "webhook", "webhook_url": "http://169.254.169.254/latest/meta-data/"},
+    })
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_webhook_url_valid_accepted(client):
+    """Valid localhost webhook should be accepted."""
+    resp = await client.post("/api/v1/agents/register", json={
+        "agent_id": "good-webhook",
+        "name": "Good Webhook",
+        "contact": {"method": "webhook", "webhook_url": "http://127.0.0.1:8080/webhook"},
+    })
+    assert resp.status_code == 200

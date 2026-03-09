@@ -5,11 +5,15 @@ A2A-compatible message relay for CLI-based AI agents.
 Run: python -m relay.server
 """
 
+import logging
 import time
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger("relay")
 
 from .auth import (
     check_read_permission,
@@ -17,7 +21,7 @@ from .auth import (
     check_task_update_permission,
     get_authenticated_agent,
 )
-from .config import AUTH_ENABLED, DB_PATH, HOST, PORT
+from .config import AUTH_ENABLED, BOOTSTRAP_TOKEN, DB_PATH, HOST, PORT
 from .db import Database
 from .models import (
     AcknowledgeRequest,
@@ -51,6 +55,16 @@ app = FastAPI(
 )
 
 
+async def _dispatch_webhook(url: str, task: dict):
+    """Fire-and-forget POST to an agent's webhook URL."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            await client.post(url, json=task)
+        logger.info("Webhook dispatched for task %s", task.get("task_id", "")[:64])
+    except Exception as e:
+        logger.warning("Webhook dispatch failed for %s: %s", url, e)
+
+
 # --- Health ---
 
 @app.get("/health")
@@ -73,11 +87,39 @@ async def register_agent(body: AgentRegisterRequest, request: Request):
 
     # Cap self-registration at tier 2 unless:
     # 1. An existing tier-1 agent authenticates (admin vouch), or
-    # 2. No agents exist yet (bootstrap — first agent gets requested tier)
+    # 2. No agents exist yet AND RELAY_BOOTSTRAP_TOKEN matches (first agent)
+    # Block re-registration without auth (prevents account takeover)
+    existing = await db.get_agent(body.agent_id)
+    if existing:
+        try:
+            caller = await get_authenticated_agent(request)
+            is_self = await db.verify_api_key(
+                body.agent_id,
+                request.headers.get("authorization", "")[7:])
+            is_admin = caller.get("trust_tier", 3) == 1
+            if not is_self and not is_admin:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Re-registration requires auth as the existing agent or tier-1 admin")
+        except HTTPException as e:
+            if e.status_code == 401:
+                raise HTTPException(
+                    status_code=409, detail="Agent already registered")
+            raise
+
     effective_tier = body.trust_tier
     if effective_tier < 2:
         agents = await db.list_agents()
-        if agents:  # Not bootstrap — require admin auth
+        if not agents:
+            # Bootstrap — require token if configured
+            if BOOTSTRAP_TOKEN:
+                if body.api_key != BOOTSTRAP_TOKEN:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Tier 1 bootstrap requires RELAY_BOOTSTRAP_TOKEN")
+            # else: no token configured, allow first agent (backwards compat)
+        else:
+            # Not bootstrap — require admin auth
             try:
                 caller = await get_authenticated_agent(request)
                 if caller.get("trust_tier", 3) > 1:
@@ -118,7 +160,7 @@ async def get_agent(agent_id: str, request: Request):
     db: Database = request.app.state.db
     agent = await db.get_agent(agent_id)
     if not agent:
-        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+        raise HTTPException(status_code=404, detail="Agent not found")
     return agent
 
 
@@ -133,7 +175,7 @@ async def heartbeat(agent_id: str, body: HeartbeatRequest, request: Request):
 
     success = await db.heartbeat(agent_id, body.status.value)
     if not success:
-        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+        raise HTTPException(status_code=404, detail="Agent not found")
     return {"status": "ok"}
 
 
@@ -145,7 +187,7 @@ async def delete_agent(agent_id: str, request: Request):
     db: Database = request.app.state.db
     success = await db.delete_agent(agent_id)
     if not success:
-        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+        raise HTTPException(status_code=404, detail="Agent not found")
     return {"status": "deleted"}
 
 
@@ -159,7 +201,7 @@ async def create_task(body: TaskCreateRequest, request: Request):
     # Check target agent exists
     target = await db.get_agent(body.to_agent)
     if not target:
-        raise HTTPException(status_code=404, detail=f"Target agent '{body.to_agent}' not found")
+        raise HTTPException(status_code=404, detail="Target agent not found")
 
     # Check permissions
     check_send_permission(caller, body.to_agent)
@@ -173,6 +215,11 @@ async def create_task(body: TaskCreateRequest, request: Request):
         due_by=body.due_by,
         metadata=body.metadata,
     )
+
+    # Dispatch webhook if target agent has one registered
+    if target.get("contact", {}).get("webhook_url"):
+        await _dispatch_webhook(target["contact"]["webhook_url"], task)
+
     return task
 
 
@@ -182,7 +229,7 @@ async def get_task(task_id: str, request: Request):
     db: Database = request.app.state.db
     task = await db.get_task_with_messages(task_id)
     if not task:
-        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+        raise HTTPException(status_code=404, detail="Task not found")
     check_read_permission(caller, task)
     return task
 
@@ -194,7 +241,7 @@ async def update_task(task_id: str, body: TaskUpdateRequest, request: Request):
 
     task = await db.get_task(task_id)
     if not task:
-        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+        raise HTTPException(status_code=404, detail="Task not found")
 
     check_task_update_permission(caller, task, body.status.value)
 
@@ -240,7 +287,7 @@ async def create_message(task_id: str, body: MessageCreateRequest, request: Requ
 
     task = await db.get_task(task_id)
     if not task:
-        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+        raise HTTPException(status_code=404, detail="Task not found")
     check_read_permission(caller, task)
 
     parts = [p.model_dump() for p in body.parts] if body.parts else None
@@ -255,7 +302,7 @@ async def get_messages(task_id: str, request: Request):
 
     task = await db.get_task(task_id)
     if not task:
-        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+        raise HTTPException(status_code=404, detail="Task not found")
     check_read_permission(caller, task)
 
     messages = await db.get_messages(task_id)
@@ -297,7 +344,7 @@ async def create_artifact(task_id: str, body: ArtifactCreateRequest, request: Re
 
     task = await db.get_task(task_id)
     if not task:
-        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+        raise HTTPException(status_code=404, detail="Task not found")
     check_read_permission(caller, task)
 
     parts = [p.model_dump() for p in body.parts] if body.parts else None
@@ -313,7 +360,7 @@ async def get_artifacts(task_id: str, request: Request):
 
     task = await db.get_task(task_id)
     if not task:
-        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+        raise HTTPException(status_code=404, detail="Task not found")
     check_read_permission(caller, task)
 
     artifacts = await db.get_artifacts(task_id)
