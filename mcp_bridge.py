@@ -154,6 +154,18 @@ TOOLS = [
         },
     },
     {
+        "name": "relay_wait_inbox",
+        "description": "Long-poll for new inbox items. Blocks until something arrives or timeout. Use when waiting for a specific response instead of polling.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "timeout": {"type": "integer", "description": "Max seconds to wait (default 30, max 60)", "default": 30},
+                "from_agent": {"type": "string", "description": "Filter by sender agent ID"},
+                "since": {"type": "string", "description": "ISO datetime — only items after this"},
+            },
+        },
+    },
+    {
         "name": "relay_heartbeat",
         "description": "Update your online/offline/busy status. Called automatically at session start and end.",
         "inputSchema": {
@@ -175,11 +187,11 @@ def _headers() -> dict:
     return h
 
 
-def _api(method: str, path: str, body: dict | None = None) -> dict:
+def _api(method: str, path: str, body: dict | None = None, timeout: int = 10) -> dict:
     """Synchronous HTTP call to relay API."""
     url = f"{RELAY_URL}/api/v1{path}"
     try:
-        with httpx.Client(timeout=10) as client:
+        with httpx.Client(timeout=timeout) as client:
             if method == "GET":
                 resp = client.get(url, headers=_headers(), params=body)
             elif method == "POST":
@@ -261,6 +273,15 @@ def handle_tool_call(name: str, args: dict) -> Any:
             "content": args["content"],
             "mime_type": args.get("mime_type", "text/plain"),
         })
+
+    elif name == "relay_wait_inbox":
+        wait_timeout = args.get("timeout", 30)
+        params = {"timeout": wait_timeout}
+        if args.get("from_agent"):
+            params["from"] = args["from_agent"]
+        if args.get("since"):
+            params["since"] = args["since"]
+        return _api("GET", f"/inbox/{AGENT_ID}/wait", params, timeout=wait_timeout + 5)
 
     elif name == "relay_heartbeat":
         status = args.get("status", "online")

@@ -667,3 +667,43 @@ async def test_inbox_filter_by_since(client, registered_agents):
     inbox = resp.json()
     assert len(inbox["pending_tasks"]) == 0
     assert len(inbox["unread_messages"]) == 0
+
+
+# --- Long Polling ---
+
+@pytest.mark.asyncio
+async def test_wait_inbox_returns_immediately_when_items(client, registered_agents):
+    """Long poll returns immediately when inbox already has items."""
+    await client.post("/api/v1/tasks", headers=_h("primary"), json={
+        "to_agent": "scheduler", "title": "Waiting task"})
+
+    resp = await client.get("/api/v1/inbox/scheduler/wait",
+                            headers=_h("scheduler"),
+                            params={"timeout": 5})
+    assert resp.status_code == 200
+    inbox = resp.json()
+    assert len(inbox["pending_tasks"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_wait_inbox_timeout_returns_empty(client, registered_agents):
+    """Long poll returns empty inbox after timeout when nothing arrives."""
+    import time
+    start = time.time()
+    resp = await client.get("/api/v1/inbox/builder/wait",
+                            headers=_h("builder"),
+                            params={"timeout": 2})
+    elapsed = time.time() - start
+    assert resp.status_code == 200
+    assert elapsed >= 1.5
+    inbox = resp.json()
+    assert len(inbox["pending_tasks"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_wait_inbox_permission_denied(client, registered_agents):
+    """Tier 2 agent can't long-poll another agent's inbox."""
+    resp = await client.get("/api/v1/inbox/primary/wait",
+                            headers=_h("scheduler"),
+                            params={"timeout": 2})
+    assert resp.status_code == 403

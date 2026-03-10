@@ -5,6 +5,7 @@ A2A-compatible message relay for CLI-based AI agents.
 Run: python -m relay.server
 """
 
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -344,6 +345,29 @@ async def get_inbox(
     inbox = await db.get_inbox(agent_id, from_agent=from_agent, since=since,
                                limit=limit, offset=offset)
     return inbox
+
+
+@app.get("/api/v1/inbox/{agent_id}/wait")
+async def wait_for_inbox(
+    agent_id: str, request: Request,
+    timeout: int = Query(30, le=60),
+    from_agent: str = Query(None, alias="from"),
+    since: str = Query(None),
+):
+    """Long-poll: block until new inbox items arrive or timeout."""
+    caller = await get_authenticated_agent(request)
+    if caller.get("trust_tier", 3) > 1 and caller["agent_id"] != agent_id:
+        raise HTTPException(status_code=403, detail="Can only check own inbox")
+
+    db: Database = request.app.state.db
+
+    for _ in range(timeout // 2):
+        inbox = await db.get_inbox(agent_id, from_agent=from_agent, since=since, limit=20)
+        if inbox["pending_tasks"] or inbox["unread_messages"] or inbox["tasks_needing_input"]:
+            return inbox
+        await asyncio.sleep(2)
+
+    return {"pending_tasks": [], "unread_messages": [], "tasks_needing_input": []}
 
 
 @app.post("/api/v1/inbox/{agent_id}/ack")
