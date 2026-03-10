@@ -9,6 +9,8 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
+logging.basicConfig(level=logging.INFO)
+
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -55,12 +57,12 @@ app = FastAPI(
 )
 
 
-async def _dispatch_webhook(url: str, task: dict):
+async def _dispatch_webhook(url: str, payload: dict, event: str = "task.created"):
     """Fire-and-forget POST to an agent's webhook URL."""
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            await client.post(url, json=task)
-        logger.info("Webhook dispatched for task %s", task.get("task_id", "")[:64])
+            await client.post(url, json={"event": event, "data": payload})
+        logger.info("Webhook [%s] dispatched to %s", event, url[:50])
     except Exception as e:
         logger.warning("Webhook dispatch failed for %s: %s", url, e)
 
@@ -218,7 +220,7 @@ async def create_task(body: TaskCreateRequest, request: Request):
 
     # Dispatch webhook if target agent has one registered
     if target.get("contact", {}).get("webhook_url"):
-        await _dispatch_webhook(target["contact"]["webhook_url"], task)
+        await _dispatch_webhook(target["contact"]["webhook_url"], task, "task.created")
 
     return task
 
@@ -250,6 +252,12 @@ async def update_task(task_id: str, body: TaskUpdateRequest, request: Request):
     # If a message was included with the status update, create it
     if body.message:
         await db.create_message(task_id, caller["agent_id"], body.message)
+
+    # Dispatch webhook to the other party on status change
+    other_id = task["to_agent"] if caller["agent_id"] == task["from_agent"] else task["from_agent"]
+    other = await db.get_agent(other_id)
+    if other and other.get("contact", {}).get("webhook_url"):
+        await _dispatch_webhook(other["contact"]["webhook_url"], updated, "task.updated")
 
     return updated
 
@@ -292,6 +300,13 @@ async def create_message(task_id: str, body: MessageCreateRequest, request: Requ
 
     parts = [p.model_dump() for p in body.parts] if body.parts else None
     message = await db.create_message(task_id, caller["agent_id"], body.content, parts)
+
+    # Dispatch webhook to the other party on new message
+    target_id = task["to_agent"] if caller["agent_id"] == task["from_agent"] else task["from_agent"]
+    target_agent = await db.get_agent(target_id)
+    if target_agent and target_agent.get("contact", {}).get("webhook_url"):
+        await _dispatch_webhook(target_agent["contact"]["webhook_url"], message, "message.new")
+
     return message
 
 
@@ -312,7 +327,13 @@ async def get_messages(task_id: str, request: Request):
 # --- Inbox ---
 
 @app.get("/api/v1/inbox/{agent_id}")
-async def get_inbox(agent_id: str, request: Request):
+async def get_inbox(
+    agent_id: str, request: Request,
+    from_agent: str = Query(None, alias="from"),
+    since: str = Query(None),
+    limit: int = Query(50, le=200),
+    offset: int = Query(0),
+):
     caller = await get_authenticated_agent(request)
 
     # Non-tier-1 can only check own inbox
@@ -320,7 +341,8 @@ async def get_inbox(agent_id: str, request: Request):
         raise HTTPException(status_code=403, detail="Can only check own inbox")
 
     db: Database = request.app.state.db
-    inbox = await db.get_inbox(agent_id)
+    inbox = await db.get_inbox(agent_id, from_agent=from_agent, since=since,
+                               limit=limit, offset=offset)
     return inbox
 
 

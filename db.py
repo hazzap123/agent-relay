@@ -109,6 +109,12 @@ def _hash_key(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
 
+def _constant_time_compare(a: str, b: str) -> bool:
+    """Constant-time string comparison to prevent timing attacks."""
+    import hmac
+    return hmac.compare_digest(a.encode(), b.encode())
+
+
 class Database:
     def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
@@ -183,7 +189,7 @@ class Database:
         row = await cursor.fetchone()
         if not row:
             return False
-        return row["api_key_hash"] == _hash_key(api_key)
+        return _constant_time_compare(row["api_key_hash"], _hash_key(api_key))
 
     async def heartbeat(self, agent_id: str, status: str = "online") -> bool:
         now = _now()
@@ -415,17 +421,24 @@ class Database:
     # --- Inbox ---
 
     async def get_inbox(self, agent_id: str, status: str | None = None,
-                        limit: int = 50) -> dict:
+                        limit: int = 50, from_agent: str | None = None,
+                        since: str | None = None, offset: int = 0) -> dict:
         """Get pending tasks and unread messages for an agent."""
         # Pending tasks (submitted to this agent)
-        pending_q = """
-            SELECT * FROM tasks WHERE to_agent=? AND status IN ('submitted', 'input_needed')
-            ORDER BY CASE priority
+        pending_q = "SELECT * FROM tasks WHERE to_agent=? AND status IN ('submitted', 'input_needed')"
+        pending_params: list = [agent_id]
+        if from_agent:
+            pending_q += " AND from_agent=?"
+            pending_params.append(from_agent)
+        if since:
+            pending_q += " AND created_at>=?"
+            pending_params.append(since)
+        pending_q += """ ORDER BY CASE priority
                 WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
                 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 END,
-            created_at DESC LIMIT ?
-        """
-        cursor = await self._db.execute(pending_q, (agent_id, limit))
+            created_at DESC LIMIT ? OFFSET ?"""
+        pending_params.extend([limit, offset])
+        cursor = await self._db.execute(pending_q, pending_params)
         pending = [self._row_to_task(r) for r in await cursor.fetchall()]
 
         # Unread messages (deliveries pending for this agent)
@@ -434,10 +447,17 @@ class Database:
             FROM deliveries d
             JOIN messages m ON d.message_id = m.message_id
             JOIN tasks t ON m.task_id = t.task_id
-            WHERE d.target_agent=? AND d.status='pending' AND d.message_id IS NOT NULL
-            ORDER BY m.created_at DESC LIMIT ?
-        """
-        cursor = await self._db.execute(unread_q, (agent_id, limit))
+            WHERE d.target_agent=? AND d.status='pending' AND d.message_id IS NOT NULL"""
+        unread_params: list = [agent_id]
+        if from_agent:
+            unread_q += " AND m.from_agent=?"
+            unread_params.append(from_agent)
+        if since:
+            unread_q += " AND m.created_at>=?"
+            unread_params.append(since)
+        unread_q += " ORDER BY m.created_at DESC LIMIT ? OFFSET ?"
+        unread_params.extend([limit, offset])
+        cursor = await self._db.execute(unread_q, unread_params)
         unread_rows = await cursor.fetchall()
         unread = []
         for r in unread_rows:
@@ -452,11 +472,14 @@ class Database:
             })
 
         # Tasks needing input from this agent (as sender)
-        input_q = """
-            SELECT * FROM tasks WHERE from_agent=? AND status='input_needed'
-            ORDER BY updated_at DESC LIMIT ?
-        """
-        cursor = await self._db.execute(input_q, (agent_id, limit))
+        input_q = "SELECT * FROM tasks WHERE from_agent=? AND status='input_needed'"
+        input_params: list = [agent_id]
+        if since:
+            input_q += " AND updated_at>=?"
+            input_params.append(since)
+        input_q += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+        input_params.extend([limit, offset])
+        cursor = await self._db.execute(input_q, input_params)
         needs_input = [self._row_to_task(r) for r in await cursor.fetchall()]
 
         return {

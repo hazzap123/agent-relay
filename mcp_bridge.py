@@ -2,7 +2,7 @@
 """
 MCP Bridge for Agent Relay.
 
-Exposes the relay as 10 MCP tools that agents can call natively.
+Exposes the relay as 10 MCP tools that Claude Code and Abby can call natively.
 Communicates with the relay server via HTTP.
 
 Usage:
@@ -23,8 +23,22 @@ import httpx
 
 # MCP protocol uses JSON-RPC 2.0 over stdio
 RELAY_URL = os.getenv("RELAY_URL", "http://localhost:8400")
-RELAY_API_KEY = os.getenv("RELAY_API_KEY", "")
 AGENT_ID = os.getenv("AGENT_ID", "claude-code")
+
+
+def _load_api_key() -> str:
+    """Load API key from env var or file. File takes precedence."""
+    key_file = os.getenv("RELAY_API_KEY_FILE", "")
+    if key_file:
+        path = os.path.expanduser(key_file)
+        try:
+            return open(path).read().strip()
+        except OSError:
+            pass
+    return os.getenv("RELAY_API_KEY", "")
+
+
+RELAY_API_KEY = _load_api_key()
 
 TOOLS = [
     {
@@ -34,6 +48,8 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "limit": {"type": "integer", "description": "Max items to return", "default": 20},
+                "from_agent": {"type": "string", "description": "Filter by sender agent ID"},
+                "since": {"type": "string", "description": "ISO datetime — only items after this"},
             },
         },
     },
@@ -186,8 +202,12 @@ def handle_tool_call(name: str, args: dict) -> Any:
     """Route MCP tool call to relay API."""
 
     if name == "relay_inbox":
-        limit = args.get("limit", 20)
-        return _api("GET", f"/inbox/{AGENT_ID}?limit={limit}")
+        params = {"limit": args.get("limit", 20)}
+        if args.get("from_agent"):
+            params["from"] = args["from_agent"]
+        if args.get("since"):
+            params["since"] = args["since"]
+        return _api("GET", f"/inbox/{AGENT_ID}", params)
 
     elif name == "relay_send_task":
         return _api("POST", "/tasks", {

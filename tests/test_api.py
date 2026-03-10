@@ -539,3 +539,131 @@ async def test_webhook_url_valid_accepted(client):
         "contact": {"method": "webhook", "webhook_url": "http://127.0.0.1:8080/webhook"},
     })
     assert resp.status_code == 200
+
+
+# --- Webhook Event Dispatch (B5) ---
+
+@pytest.mark.asyncio
+async def test_webhook_event_payload_format(client, registered_agents):
+    """Webhook payload must use {"event": "...", "data": {...}} structure."""
+    import respx
+
+    # Scheduler has a webhook_url registered
+    with respx.mock:
+        route = respx.post("http://localhost:8080/webhook").respond(200)
+
+        resp = await client.post("/api/v1/tasks", headers=_h("primary"), json={
+            "to_agent": "scheduler",
+            "title": "Webhook format test",
+        })
+        assert resp.status_code == 200
+
+        # Verify webhook was called with correct format
+        assert route.called
+        body = route.calls[0].request.content
+        import json as _json
+        payload = _json.loads(body)
+        assert "event" in payload
+        assert payload["event"] == "task.created"
+        assert "data" in payload
+        assert payload["data"]["title"] == "Webhook format test"
+
+
+@pytest.mark.asyncio
+async def test_webhook_on_message_new(client, registered_agents):
+    """Webhook dispatched when a message is posted to a task thread."""
+    import respx
+
+    with respx.mock:
+        route = respx.post("http://localhost:8080/webhook").respond(200)
+
+        # Create task to scheduler (has webhook)
+        resp = await client.post("/api/v1/tasks", headers=_h("primary"), json={
+            "to_agent": "scheduler",
+            "title": "Message webhook test",
+        })
+        task_id = resp.json()["task_id"]
+        initial_calls = len(route.calls)
+
+        # Primary sends message — should trigger webhook to scheduler
+        resp = await client.post(f"/api/v1/tasks/{task_id}/messages",
+                                 headers=_h("primary"),
+                                 json={"content": "Check this out"})
+        assert resp.status_code == 200
+
+        assert len(route.calls) > initial_calls
+        import json as _json
+        last_payload = _json.loads(route.calls[-1].request.content)
+        assert last_payload["event"] == "message.new"
+        assert last_payload["data"]["from_agent"] == "primary"
+
+
+@pytest.mark.asyncio
+async def test_webhook_on_task_updated(client, registered_agents):
+    """Webhook dispatched when task status changes."""
+    import respx
+
+    with respx.mock:
+        route = respx.post("http://localhost:8080/webhook").respond(200)
+
+        # Create task to scheduler
+        resp = await client.post("/api/v1/tasks", headers=_h("primary"), json={
+            "to_agent": "scheduler",
+            "title": "Status webhook test",
+        })
+        task_id = resp.json()["task_id"]
+
+        # Scheduler accepts — should trigger webhook to primary (but primary has no webhook)
+        # So let's test the other direction: primary updates → scheduler gets webhook
+        resp = await client.patch(f"/api/v1/tasks/{task_id}",
+                                  headers=_h("primary"),
+                                  json={"status": "cancelled"})
+        assert resp.status_code == 200
+
+        # Scheduler has webhook, primary cancelled → scheduler should get task.updated
+        import json as _json
+        task_updated_calls = [
+            c for c in route.calls
+            if _json.loads(c.request.content).get("event") == "task.updated"
+        ]
+        assert len(task_updated_calls) >= 1
+        payload = _json.loads(task_updated_calls[0].request.content)
+        assert payload["data"]["status"] == "cancelled"
+
+
+# --- Inbox Filtering (D1) ---
+
+@pytest.mark.asyncio
+async def test_inbox_filter_by_from_agent(client, registered_agents):
+    """Inbox filtered by from_agent only shows items from that sender."""
+    # Send tasks from different agents to builder
+    await client.post("/api/v1/tasks", headers=_h("primary"), json={
+        "to_agent": "builder", "title": "From primary"})
+    await client.post("/api/v1/tasks", headers=_h("scheduler"), json={
+        "to_agent": "builder", "title": "From scheduler"})
+
+    # Filter by primary
+    resp = await client.get("/api/v1/inbox/builder",
+                            headers=_h("builder"),
+                            params={"from": "primary"})
+    assert resp.status_code == 200
+    inbox = resp.json()
+    for task in inbox["pending_tasks"]:
+        assert task["from_agent"] == "primary"
+    assert len(inbox["pending_tasks"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_inbox_filter_by_since(client, registered_agents):
+    """Inbox filtered by since only shows items after that date."""
+    await client.post("/api/v1/tasks", headers=_h("primary"), json={
+        "to_agent": "scheduler", "title": "Old task"})
+
+    # Use a future date — should return nothing
+    resp = await client.get("/api/v1/inbox/scheduler",
+                            headers=_h("scheduler"),
+                            params={"since": "2099-01-01T00:00:00Z"})
+    assert resp.status_code == 200
+    inbox = resp.json()
+    assert len(inbox["pending_tasks"]) == 0
+    assert len(inbox["unread_messages"]) == 0
